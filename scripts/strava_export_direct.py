@@ -25,7 +25,7 @@ if env_path.exists():
                 env_vars[key] = val
 
 # For direct auth, read from .env
-ACCESS_TOKEN = os.getenv("STRAVA_ACCESS_TOKEN", "15ef2f1d5b6dcd9608e6e4bd789cc3f186ce02fe")
+ACCESS_TOKEN = os.getenv("STRAVA_ACCESS_TOKEN", "")
 
 ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
