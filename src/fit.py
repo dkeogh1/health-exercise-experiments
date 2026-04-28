@@ -109,6 +109,11 @@ def _frame_dict(frame) -> dict[str, Any]:
         v = field.value
         if name in ("position_lat", "position_long") and isinstance(v, (int, float)):
             v = v * (180.0 / 2**31)  # FIT semicircles → degrees
+        elif name == "left_right_balance":
+            # Polymorphic across FITs: int percentage for dual-sided meters,
+            # string ('left'/'right') when only one side is present. Force str
+            # so pyarrow gets a consistent column.
+            v = str(v) if v is not None else None
         if v is not None:
             out[name] = v
     # Developer fields (e.g. Stryd running power, form power)
@@ -156,7 +161,9 @@ def parse_fit(fit_path: Path) -> tuple[dict[str, Any], pd.DataFrame]:
     summary.setdefault("sport", sport.get("sport"))
     summary.setdefault("sub_sport", sport.get("sub_sport"))
     summary["device_manufacturer"] = file_id.get("manufacturer")
-    summary["device_product"] = file_id.get("garmin_product") or file_id.get("product")
+    # garmin_product is a str for known products, raw int for unknown codes.
+    prod = file_id.get("garmin_product") or file_id.get("product")
+    summary["device_product"] = str(prod) if prod is not None else None
     summary["file_serial_number"] = file_id.get("serial_number")
     summary["source_path"] = str(fit_path)
     return summary, streams

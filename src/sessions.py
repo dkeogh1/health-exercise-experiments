@@ -45,6 +45,7 @@ Output schema:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,7 @@ _TYPE_MAP: dict[str, tuple[str, bool]] = {
     "garmin:walking": ("walk", False),
     "garmin:hiking": ("hike", False),
     "garmin:strength_training": ("workout", True),
+    "garmin:training": ("workout", True),  # FIT uses bare "training"
     # Apple HKWorkoutActivityType
     "apple:hkworkoutactivitytypecycling": ("ride", False),
     "apple:hkworkoutactivitytyperunning": ("run", False),
@@ -154,6 +156,44 @@ def load_garmin(path: Path) -> pd.DataFrame:
     df["activity_type"] = df["activity_type_unified"]
     df = df.drop(columns=["activity_type_unified"])
     df["source"] = "garmin"
+    return df
+
+
+_FIT_FILENAME_ID = re.compile(r"_(\d+)\.fit$")
+
+
+def load_garmin_fit(path: Path) -> pd.DataFrame:
+    """Load Garmin GDPR FIT session summaries (one row per activity FIT)."""
+    df = pd.read_parquet(path)
+
+    # The FIT filename is <email>_<garmin_activity_id>.fit — recover the id.
+    def _extract_id(p: Any) -> Any:
+        if not isinstance(p, str):
+            return None
+        m = _FIT_FILENAME_ID.search(p)
+        return int(m.group(1)) if m else None
+
+    df["garmin_id"] = df["source_path"].map(_extract_id).astype("Int64")
+
+    df = df.rename(columns={
+        "total_elapsed_time": "duration_s",
+        "total_timer_time": "moving_s",
+        "total_distance": "distance_m",
+        "total_ascent": "elevation_gain_m",
+        "total_descent": "elevation_loss_m",
+        "avg_heart_rate": "avg_hr",
+        "max_heart_rate": "max_hr",
+        "training_stress_score": "tss",
+        "total_calories": "calories",
+    })
+    df["start_time_utc"] = pd.to_datetime(df["start_time"], utc=True, errors="coerce")
+    df["start_time_local"] = df["start_time_utc"].dt.tz_convert(None)
+    types = df["sport"].map(lambda v: _unify_type("garmin", v))
+    df["activity_type"] = [t[0] for t in types]
+    df["is_indoor"] = [t[1] for t in types]
+    df["sport_type"] = df["sport"]
+    df["device_name"] = df["device_product"]
+    df["source"] = "garmin_fit"
     return df
 
 
@@ -260,6 +300,7 @@ _OUTPUT_COLS = [
     "tss", "intensity_factor", "aerobic_te", "anaerobic_te",
     "calories", "kilojoules", "vo2max_estimate",
     "device_name", "activity_name",
+    "streams_path",
 ]
 
 
@@ -267,12 +308,15 @@ def build(
     strava_json: Path,
     garmin_parquet: Path | None,
     apple_db: Path | None,
+    garmin_fit_parquet: Path | None = None,
+    streams_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Return the unified sessions DataFrame."""
     strava = load_strava(strava_json)
     strava["sources"] = [["strava"] for _ in range(len(strava))]
 
     garmin = load_garmin(garmin_parquet) if garmin_parquet else None
+    garmin_fit = load_garmin_fit(garmin_fit_parquet) if garmin_fit_parquet else None
     apple = load_apple_workouts(apple_db) if apple_db else None
 
     # ---- Merge Garmin into Strava via fuzzy match --------------------------
@@ -313,6 +357,41 @@ def build(
             garmin_extra["kilojoules"] = pd.NA
             strava = pd.concat([strava, garmin_extra], ignore_index=True, sort=False)
 
+    # ---- Merge Garmin GDPR FIT (per-activity FIT summaries + streams_path) -
+    if garmin_fit is not None and not garmin_fit.empty:
+        fit_match = _fuzzy_match(strava, garmin_fit)
+        matched_fit_idx: set[int] = set()
+        for i, fi in fit_match.items():
+            if pd.isna(fi):
+                continue
+            f = garmin_fit.iloc[int(fi)]
+            s = strava.iloc[i]
+            matched_fit_idx.add(int(fi))
+            # The headline addition: pointer to the per-second parquet.
+            strava.at[i, "streams_path"] = f.get("streams_path")
+            if pd.isna(s.get("garmin_id")) and pd.notna(f.get("garmin_id")):
+                strava.at[i, "garmin_id"] = f["garmin_id"]
+            # Backfill any session-summary fields the Strava+Connect merge missed.
+            for col in ("avg_power", "max_power", "normalized_power",
+                        "intensity_factor", "tss", "avg_cadence", "max_cadence",
+                        "elevation_loss_m", "moving_s"):
+                if pd.isna(s.get(col)) and pd.notna(f.get(col)):
+                    strava.at[i, col] = f[col]
+            srcs = strava.at[i, "sources"]
+            strava.at[i, "sources"] = (
+                list(set(srcs + ["garmin_fit"])) if isinstance(srcs, list)
+                else ["garmin_fit"]
+            )
+
+        # FIT-only sessions (e.g. pre-Connect-API-pull history, Garmin-only workouts).
+        fit_unmatched_mask = ~pd.Index(range(len(garmin_fit))).isin(matched_fit_idx)
+        fit_extra = garmin_fit[fit_unmatched_mask].copy()
+        if not fit_extra.empty:
+            fit_extra["sources"] = [["garmin_fit"] for _ in range(len(fit_extra))]
+            fit_extra["strava_id"] = pd.NA
+            fit_extra["kilojoules"] = pd.NA
+            strava = pd.concat([strava, fit_extra], ignore_index=True, sort=False)
+
     # ---- Merge Apple into current unified via fuzzy match ------------------
     # Apple overlaps heavily with Strava/Garmin, so it's mostly for surfacing
     # the ``apple_workout_key`` as a pointer into per-workout streams.
@@ -341,6 +420,21 @@ def build(
 
     strava["session_id"] = strava.apply(_canon_id, axis=1)
     strava["primary_source"] = strava["session_id"].str.split("_").str[0]
+
+    # ---- Backfill streams_path from on-disk Strava parquets ---------------
+    # Strava streams live at <streams_dir>/strava_<id>.parquet. Only set when
+    # the file actually exists, and don't overwrite a FIT-derived path
+    # (FIT streams are richer where available).
+    if streams_dir is not None:
+        streams_dir = Path(streams_dir)
+        if "streams_path" not in strava.columns:
+            strava["streams_path"] = pd.NA
+        need_fill = strava["streams_path"].isna() & strava["strava_id"].notna()
+        for i in strava.index[need_fill]:
+            sid = strava.at[i, "strava_id"]
+            p = streams_dir / f"strava_{int(sid)}.parquet"
+            if p.exists():
+                strava.at[i, "streams_path"] = str(p)
 
     # Ensure all output columns exist.
     for col in _OUTPUT_COLS:

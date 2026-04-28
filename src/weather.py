@@ -213,13 +213,17 @@ def weather_at(
 
 
 def session_lat_lng_from_stream(stream_df: pd.DataFrame) -> tuple[float, float] | None:
-    """First non-null (lat, lng) in a stream DataFrame."""
-    if "lat" not in stream_df.columns or "lng" not in stream_df.columns:
-        return None
-    ll = stream_df[["lat", "lng"]].dropna()
-    if ll.empty:
-        return None
-    return float(ll["lat"].iloc[0]), float(ll["lng"].iloc[0])
+    """First non-null (lat, lng) in a stream DataFrame.
+
+    Strava streams use ``lat``/``lng``; Garmin FIT streams use
+    ``position_lat``/``position_long`` (already converted to degrees in src.fit).
+    """
+    for la, lo in (("lat", "lng"), ("position_lat", "position_long")):
+        if la in stream_df.columns and lo in stream_df.columns:
+            ll = stream_df[[la, lo]].dropna()
+            if not ll.empty:
+                return float(ll[la].iloc[0]), float(ll[lo].iloc[0])
+    return None
 
 
 def enrich(
@@ -251,10 +255,16 @@ def enrich(
         if skip_indoor and bool(row.get("is_indoor", False)):
             n_skipped_indoor += 1
             continue
-        sid = row.get("strava_id")
-        if pd.isna(sid):
+        # Prefer the canonical streams_path on the session row; fall back to
+        # strava_<id>.parquet for backwards compatibility.
+        sp = row.get("streams_path")
+        if isinstance(sp, str) and sp:
+            stream_path = Path(sp)
+        elif pd.notna(row.get("strava_id")):
+            stream_path = streams_dir / f"strava_{int(row['strava_id'])}.parquet"
+        else:
+            n_no_stream += 1
             continue
-        stream_path = streams_dir / f"strava_{int(sid)}.parquet"
         if not stream_path.exists():
             n_no_stream += 1
             continue
@@ -280,7 +290,7 @@ def enrich(
             if throttle_s:
                 time.sleep(throttle_s)
         except Exception as e:
-            print(f"  session {sid}: {type(e).__name__}: {e}")
+            print(f"  session {row.get('session_id')}: {type(e).__name__}: {e}")
             n_failed += 1
             continue
 

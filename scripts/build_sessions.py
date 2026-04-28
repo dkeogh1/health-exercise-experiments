@@ -24,19 +24,29 @@ def _latest(pattern: str) -> Path | None:
 def main() -> None:
     strava_json = _latest("activities_*.json")
     garmin_parquet = _latest("garmin_activities_*.parquet")
+    garmin_fit_parquet = RAW / "garmin_gdpr_summaries.parquet"
+    if not garmin_fit_parquet.exists():
+        garmin_fit_parquet = None
     apple_db = ROOT / "data" / "processed" / "apple_health.db"
     if not apple_db.exists():
         apple_db = None
+    streams_dir = ROOT / "data" / "processed" / "streams"
 
-    print(f"Strava : {strava_json}")
-    print(f"Garmin : {garmin_parquet}")
-    print(f"Apple  : {apple_db}")
+    print(f"Strava     : {strava_json}")
+    print(f"Garmin API : {garmin_parquet}")
+    print(f"Garmin FIT : {garmin_fit_parquet}")
+    print(f"Apple      : {apple_db}")
+    print(f"Streams    : {streams_dir}")
 
     if strava_json is None:
         sys.exit("No Strava activities_*.json in data/raw/")
 
     t0 = time.time()
-    df = sessions.build(strava_json, garmin_parquet, apple_db)
+    df = sessions.build(
+        strava_json, garmin_parquet, apple_db,
+        garmin_fit_parquet=garmin_fit_parquet,
+        streams_dir=streams_dir,
+    )
     sessions.write(df, OUT)
 
     dt = time.time() - t0
@@ -55,7 +65,8 @@ def main() -> None:
     apple_tagged = df[df["apple_workout_key"].notna()]
     print(f"  Strava/Garmin ∩ Apple: {len(apple_tagged)}")
     print(f"\nCoverage on key enrichments:")
-    for c in ["avg_power", "tss", "normalized_power", "aerobic_te", "vo2max_estimate"]:
+    for c in ["avg_power", "tss", "normalized_power", "aerobic_te",
+              "vo2max_estimate", "streams_path"]:
         pct = df[c].notna().mean() * 100
         print(f"  {c:20s}  {pct:5.1f}%")
 
