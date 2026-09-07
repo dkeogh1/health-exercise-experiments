@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
@@ -266,3 +266,5 @@ fig.show()
 #   exercise. Apple Watch ECG is only 30-second snippets; Garmin FR645 *can*
 #   log R-R but must be explicitly enabled. Skip until we confirm R-R in
 #   the GDPR archive FITs.
+
+# %%

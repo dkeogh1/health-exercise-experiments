@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
@@ -543,3 +543,5 @@ if len(enriched):
 # - **Always segment RHR / HRV / walking-HR by `sourceName`** if your query
 #   spans the mid-2025 Garmin → Apple Watch switch — wrist optical sensors
 #   have ~8 bpm inter-device bias at rest.
+
+# %%
