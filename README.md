@@ -5,32 +5,23 @@ Rigorous fitness data analysis with biometric integration.
 ## Project Structure
 
 ```
-~/strava-analysis/
-├── README.md                    # This file
+strava-analysis/
+├── AGENTS.md                    # Setup, commands, layout, gotchas (start here)
 ├── config/
 │   ├── .env.template           # Credentials template
 │   ├── .env                     # Your actual credentials (DO NOT COMMIT)
 │   └── strava_auth_setup.md    # OAuth flow guide
-├── data/
-│   ├── raw/                     # Raw exports from APIs
-│   ├── processed/               # Cleaned data
-│   └── exports/                 # Analysis outputs
-├── scripts/
-│   ├── strava_auth.py          # OAuth + token refresh
-│   ├── strava_export.py        # Fetch activities
-│   ├── biometric_fetch.py      # Apple HealthKit + Garmin
-│   ├── merge_data.py           # Combine sources
-│   └── requirements.txt
-├── notebooks/
-│   ├── 01_exploratory.ipynb    # Initial data review
-│   ├── 02_hypothesis_testing.ipynb
-│   └── 03_biometric_correlation.ipynb
-└── docs/
-    ├── BIOMETRIC_DATA_RESEARCH.md
-    └── EXPERIMENT_TEMPLATE.md
+├── data/                        # gitignored: raw/ exports, processed/ SQLite + Parquet
+├── src/                         # Pure modules: sessions, metrics, ml, weather, FIT
+├── scripts/                     # One-command drivers (auth, export, ingest, build)
+├── notebooks/                   # 01-06, jupytext-paired .ipynb + .py
+├── tests/smoke_metrics.py
+└── docs/ROADMAP.md
 ```
 
 ## Quick Start
+
+Full setup and command list: [AGENTS.md](AGENTS.md).
 
 1. **Set up credentials:**
    ```bash
@@ -38,23 +29,25 @@ Rigorous fitness data analysis with biometric integration.
    # Edit config/.env with your Strava Client ID & Secret
    ```
 
-2. **Install dependencies:**
+2. **Install dependencies** (Python 3.12 env; see AGENTS.md, *Setup*):
    ```bash
-   pip install -r scripts/requirements.txt
+   $PY -m pip install -r scripts/requirements.txt \
+       fitdecode scikit-learn umap-learn ruptures jupyterlab
    ```
 
-3. **Authenticate with Strava:**
+3. **Authenticate with Strava** (headless flow):
    ```bash
-   python scripts/strava_auth.py
+   $PY scripts/strava_auth_manual.py
    ```
 
-4. **Fetch your activities:**
+4. **Fetch your activities and build the data lake:**
    ```bash
-   python scripts/strava_export.py
+   $PY scripts/strava_export.py
+   $PY scripts/build_sessions.py
    ```
 
 5. **Start analyzing:**
-   Open `notebooks/01_exploratory.ipynb` in Jupyter
+   `scripts/jupyter_serve.sh`, then open `notebooks/05_performance_dashboard.ipynb`
 
 ## Data Science Principles
 

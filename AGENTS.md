@@ -5,123 +5,163 @@ unified `sessions.parquet` + per-second `streams/*.parquet` → metrics
 module (TRIMP / PMC / MMP / CP / decoupling / zones / HRV) → notebooks
 (dashboard + ML exploration).
 
-## Environment
+## Secrets & privacy (public repo)
 
-Python 3.12 in a micromamba env. Activate with the interpreter path
-directly — no shell activation required:
+This repo is public on GitHub; the data it analyses is personal health
+and location data. None of this is in git. Never commit, print, or paste
+it into chat or any third-party service:
+
+- `config/.env` — Strava + Garmin credentials and tokens. Scripts read
+  credentials only from it; never hardcode a token or fallback value.
+- `~/.garminconnect/` — cached Garmin session token (outside the repo).
+- `data/raw/*`, `data/processed/*` — activities, GPS streams, Apple
+  Health export, GDPR archives and everything derived. Aggregate it in
+  code; don't quote rows, coordinates, or personal physiology values in
+  commits or docs. On dkbl1 its only backup is the host restic job.
+- notebook outputs. Commit `.ipynb` with outputs cleared:
+  `${PY%/*}/jupyter nbconvert --clear-output --inplace notebooks/<nb>.ipynb`.
+
+Local agent state dirs such as `.claude/` are gitignored too.
+
+## Setup
+
+Python 3.12. On dkbl1 the env already exists; call its interpreter
+directly, no activation needed (`source activate.sh` puts it on `PATH`
+if you want that):
 
 ```bash
-PY=/home/dk/.local/share/mamba/envs/strava-analysis/bin/python3
-JUPYTEXT=/home/dk/.local/share/mamba/envs/strava-analysis/bin/jupytext
+PY=${PY:-$HOME/.local/share/mamba/envs/strava-analysis/bin/python3}
+JUPYTEXT=${PY%/*}/jupytext
 ```
 
-Requirements live in `scripts/requirements.txt`. The env already has
-everything listed plus: `healthkit-to-sqlite`, `garminconnect`,
-`fitdecode`, `jupytext`, `july`, `pyarrow`, `statsmodels`, `sklearn`,
-`umap-learn`, `ruptures`, `pyod`-equivalent (IsolationForest via sklearn).
+Fresh machine: any 3.12 env works, e.g.
+
+```bash
+python3.12 -m venv venv && PY=$PWD/venv/bin/python3
+$PY -m pip install -r scripts/requirements.txt \
+    fitdecode scikit-learn umap-learn ruptures jupyterlab
+cp config/.env.template config/.env
+```
+
+`scripts/requirements.txt` lacks the ML/FIT extras on that line; add new
+deps there. The user fills in `config/.env` (`STRAVA_CLIENT_ID` /
+`STRAVA_CLIENT_SECRET`, `GARMIN_EMAIL` / `GARMIN_PASSWORD`).
+
+**Auth is interactive; hand it to the user.** Strava:
+`$PY scripts/strava_auth_manual.py` prints the authorize URL and reads the
+pasted code back; tokens go to `config/.env` and refresh automatically
+after that. Don't run `strava_auth.py` on dkbl1: it opens a browser and
+listens on port 8000 on all interfaces. Garmin: the first
+`garmin_fetch.py` login may prompt for an MFA code.
+`strava_export.py` is the canonical exporter; `strava_export_direct.py` /
+`strava_export_simple.py` are early one-offs whose `data/activities.csv`
+nothing reads. More: [config/strava_auth_setup.md](config/strava_auth_setup.md).
 
 ## Layout
 
 ```
 src/                    # pure modules — no I/O except explicit loaders
   apple_health.py         XML → SQLite + per-source RHR query
-  sessions.py             unified fuzzy-merge of Strava/Garmin/Apple
+  sessions.py             unified fuzzy-merge of Strava/Garmin/Apple/FIT
   metrics.py              TRIMP, PMC, MMP, CP, zones, decoupling
   weather.py              Open-Meteo historical + SQLite cache
-  fit.py                  fitdecode FIT → Parquet (GDPR archive ready)
+  fit.py                  fitdecode FIT → Parquet (GDPR archives)
   ml.py                   ruptures + UMAP + IsolationForest
 scripts/                # one-command drivers
-  apple_health_ingest.py  → data/processed/apple_health.db
+  apple_health_ingest.py  data/raw/apple_health_export/export.xml → apple_health.db
   strava_export.py        → data/raw/activities_<stamp>.json+csv
   strava_streams.py       → data/processed/streams/strava_<id>.parquet
   garmin_fetch.py         → data/raw/garmin_activities_<stamp>.parquet
+  garmin_gdpr_ingest.py   data/raw/garmin_gdpr/fit → streams/<hash>.parquet
   build_sessions.py       → data/processed/sessions.parquet
   enrich_weather.py       → weather columns on sessions.parquet
+  jupyter_serve.sh        JupyterLab on 127.0.0.1:8888
 notebooks/              # jupytext-paired .ipynb + .py:percent
-  01_exploratory        initial EDA (session-level only)
-  02_hypothesis_testing 5 H1-H5 tests, session-level
-  03_biometric_corr     early draft, superseded by 04
-  04_readiness          Plews/Altini rolling-z readiness, RHR/HRV/sleep
-  05_performance_dash   10 sections — PMC, MMP, clusters, zones, weather
-  06_ml_exploration     CTL change-point, UMAP clusters, IsoForest
-tests/
-  smoke_metrics.py        exercises every metric on real data
-data/
-  raw/                    gitignored: Strava json, Garmin parquet,
-                          Apple Health export.xml (1.2 GB), apple_health.csv
-  processed/              gitignored: apple_health.db, sessions.parquet,
-                          streams/strava_<id>.parquet, weather_cache.sqlite
-config/
-  .env                    gitignored — Strava + Garmin creds
+  01–03                   early EDA / hypothesis tests (03 superseded by 04)
+  04_readiness            Plews/Altini rolling-z readiness, RHR/HRV/sleep
+  05_performance_dash     PMC, MMP, clusters, zones, weather
+  06_ml_exploration       CTL change-point, UMAP clusters, IsoForest
 ```
 
 ## Common operations
 
 ```bash
-# Rebuild sessions.parquet after any raw-data change
+# Pull new Strava activities, then their streams
+$PY scripts/strava_export.py
+$PY scripts/strava_streams.py            # --since YYYY-MM-DD, --limit N
+
+# Garmin: API pull (session cached in ~/.garminconnect), or GDPR archive
+$PY scripts/garmin_fetch.py
+$PY scripts/garmin_gdpr_ingest.py
+
+# Fresh Apple Health export → SQLite (~35 s), then the daily CSV that
+# notebooks 04–06 read (no script writes it)
+$PY scripts/apple_health_ingest.py
+$PY -c "from pathlib import Path; from src import apple_health as ah; ah.daily_metrics(Path('data/processed/apple_health.db')).to_csv('data/raw/apple_health.csv', index=False)"
+
+# Rebuild sessions.parquet after any raw-data change, then re-enrich
+# weather (idempotent, cache-aware)
 $PY scripts/build_sessions.py
+$PY scripts/enrich_weather.py
+
+# Smoke-test all metrics (needs the private data/, so local only)
+$PY tests/smoke_metrics.py
 
 # Sync notebook pair (run whenever you edit either side)
 cd notebooks && $JUPYTEXT --sync 05_performance_dashboard.py
 
-# Smoke-test all metrics against current data
-$PY tests/smoke_metrics.py
-
-# Re-enrich weather after new streams land (idempotent, cache-aware)
-$PY scripts/enrich_weather.py
-
-# Fresh Apple Health export → SQLite (~35s for 1.2 GB XML)
-$PY scripts/apple_health_ingest.py
-
-# Pull new Strava activities
-$PY scripts/strava_export.py
+# JupyterLab (dkbl1 is headless): start / url / stop
+scripts/jupyter_serve.sh
 ```
 
-## In-flight work — resuming after power-down
+`jupyter_serve.sh` binds 127.0.0.1:8888 and prints the token URL; the user
+tunnels in from their laptop (see the script header). `stop` kills every
+`jupyter-lab` on the host.
 
-**Strava streams pull** runs as a long-lived background process. On reboot
-it will be dead; to resume:
+## Resumable jobs
+
+dkbl1 can power off under load, so long pulls run detached (from the
+repo root) and are built to resume:
 
 ```bash
-cd /home/dk/repos/strava-analysis
 nohup $PY scripts/strava_streams.py \
   > data/processed/streams/_strava_stdout.log 2>&1 &
 ```
 
-The script is idempotent — it skips any activity whose
-`data/processed/streams/strava_<id>.parquet` already exists, so restarts
-cost nothing. Progress state in
-`data/processed/streams/_strava_progress.json`. Last snapshot (2026-04-23
-20:33 UTC): 539 of ~1,651 streams pulled, last_pulled_id 5815879873
-(oldest-first order; mid-2021 era).
-
-**After streams complete**, re-run (in order):
-1. `$PY scripts/enrich_weather.py` — fills weather for the new streams
-2. Re-execute notebooks 05 and 06 — MMP, decoupling, zone-distribution,
-   weather charts, UMAP clusters all get denser
+It skips any activity whose `streams/strava_<id>.parquet` exists, so a
+restart costs nothing. State is in
+`data/processed/streams/_strava_progress.json` (last run, last pulled id)
+and the tail of `_strava_stdout.log` (`✓ Done.` when complete); it
+self-throttles under Strava's rate limit. `garmin_gdpr_ingest.py` is
+idempotent the same way. After new streams land: `enrich_weather.py`,
+then re-run notebooks 05 and 06.
 
 ## Known gotchas (load-bearing — don't forget)
 
-- **RHR / HRV / walking-HR / SpO₂ must be segmented by `sourceName`**
-  across multi-year spans. Garmin FR645 was primary 2020–mid-2025; Apple
-  Watch S10 after. Inter-device bias ≈ 8 bpm at rest. Never plot a merged
-  line. Use `ah.rhr_by_source(db)` instead of
-  `ah.daily_metrics(db)["resting_hr"]`.
+- **RHR / HRV / walking-HR / SpO₂ / wrist temp / VO₂max must be
+  segmented by `sourceName`** across multi-year spans: the primary wrist
+  device changed partway through the archive, and optical sensors carry
+  a several-bpm inter-device bias. Never plot a merged line, and never
+  read a step change near a device switch as physiology before checking
+  the `sourceName` mix on both sides. Use `ah.rhr_by_source(db)` instead
+  of `ah.daily_metrics(db)["resting_hr"]`. Device-specific metrics (e.g.
+  Apple Watch running power, VO₂max estimate, HRR1) have no comparator
+  across a switch: don't fit a trend that spans it. Chest-strap-based
+  load (TSS / hrTSS) is exempt.
 
 - **Apple Watch HRV is SDNN, not RMSSD**, and only sampled during Breathe
-  sessions (~1 / day). Expect ~10 % day-coverage. Ignore day-to-day
-  changes < 10 ms.
+  sessions (~1 / day, sparse). Ignore day-to-day changes < 10 ms.
 
 - **`garth` is deprecated** (Cloudflare 429s since 2025). We use
-  `python-garminconnect` which has `curl_cffi` TLS impersonation and web-
-  login fallback. If that breaks too, Garmin's GDPR data archive is the
-  fallback.
+  `python-garminconnect` (`curl_cffi` TLS impersonation, web-login
+  fallback); if that breaks too, Garmin's GDPR archive is the fallback.
 
-- **Apple Watch S10 running power ≠ Stryd** — different physical
-  constructs. Don't pool for CP fits.
+- **Stryd and Apple Watch running power are different constructs** —
+  don't pool them for CP fits.
 
 - **Per-year anchors, not archive-wide**. HRmax, LTHR, FTP change over
-  10 years; `metrics.anchors_for_year()` returns them per year.
+  10 years; `metrics.anchors_for_year()` returns them. HRmax is observed
+  (`metrics.observed_hrmax`), never 220 − age.
 
 - **CTL/ATL use canonical `α = 1 − exp(−1/τ)`**, not pandas' default
   `span = 2/(τ+1)` for `.ewm()`.
@@ -129,25 +169,14 @@ cost nothing. Progress state in
 - **ACWR is computed but don't trust it** — Impellizzeri 2020 showed it's
   a statistical artefact. Report with skepticism.
 
-## What's NOT in git
+## Docs
 
-- `data/raw/*` (personal activity data, Apple Health XML 1.2 GB)
-- `data/processed/*` (SQLite DB, Parquet files, weather cache)
-- `config/.env` (Strava + Garmin credentials)
-- `.claude/` (Claude Code local session state)
-- `~/.garminconnect/` (cached Garmin session token, outside repo)
-
-## Memory index
-
-Claude-Code project memory at
-`~/.claude/projects/-home-dk-repos-strava-analysis/memory/`:
-- `project_roadmap.md` — 6-phase plan with current status
-- `feedback_device_bias.md` — the source-segmentation rule above
-
-## Pending external events
-
-- **Strava GDPR data archive** requested 2026-04-23 (24–48 h ETA, email
-  notification). Extract to `data/raw/strava_gdpr/` and run
-  `src.fit.ingest_directory()` to parse every FIT into
-  `data/processed/streams/` at fuller resolution than the API streams.
-- **Garmin GDPR data archive** also requested 2026-04-23.
+- [docs/ROADMAP.md](docs/ROADMAP.md) — phase status, settled decisions,
+  next moves
+- [docs/BIOMETRIC_INTEGRATION_GUIDE.md](docs/BIOMETRIC_INTEGRATION_GUIDE.md)
+- [EXPERIMENT_TEMPLATE.md](EXPERIMENT_TEMPLATE.md) — hypothesis write-up
+  template
+- Early planning, partly stale (paths, env commands):
+  [ANALYSIS_OPTIONS.md](ANALYSIS_OPTIONS.md),
+  [BIOMETRIC_DATA_RESEARCH.md](BIOMETRIC_DATA_RESEARCH.md),
+  [SETUP_SUMMARY.md](SETUP_SUMMARY.md). This file wins on conflict.
